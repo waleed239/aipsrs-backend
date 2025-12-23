@@ -1,0 +1,5 @@
+flask
+flask-cors
+replicate
+python-dotenv
+werkzeug
