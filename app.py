@@ -1,5 +1,5 @@
 """
-AIPSRS - Flask Backend (Industry Best Practice)
+AIPSRS - Flask Backend (Linux/Render Ready)
 ASYNC Replicate Prediction + Frontend-Safe JSON + Delete Support
 """
 
@@ -36,7 +36,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-FFPROBE_PATH = r"C:\ffmpeg-2025-12-14-git-3332b2db84-essentials_build\bin\ffprobe.exe"
+# Linux/Render-ready ffprobe
+FFPROBE_PATH = "ffprobe"
 
 # =========================================================
 # App & Logging
@@ -57,7 +58,8 @@ def allowed_file(filename):
 
 def get_video_duration(path):
     cmd = [
-        FFPROBE_PATH, "-v", "error",
+        FFPROBE_PATH,
+        "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         path
@@ -181,7 +183,7 @@ def predict():
     })
 
 # =========================================================
-# History (Frontend Safe)
+# History
 # =========================================================
 @app.route("/history")
 def history():
@@ -203,7 +205,7 @@ def history():
     ])
 
 # =========================================================
-# DELETE History (🔥 FIXED)
+# DELETE History
 # =========================================================
 @app.route("/history/<record_uuid>", methods=["DELETE"])
 def delete_history(record_uuid):
@@ -225,9 +227,7 @@ def delete_history(record_uuid):
 # =========================================================
 @app.route("/stats/<user_id>")
 def stats(user_id):
-    # Count total videos for this user
     videos = supabase.table("user_videos").select("id", count="exact").eq("user_id", user_id).execute()
-    # Count predictions/history for this user
     preds = supabase.table("predictions").select("id", count="exact").eq("user_id", user_id).execute()
 
     return jsonify({
@@ -239,5 +239,6 @@ def stats(user_id):
 # Run
 # =========================================================
 if __name__ == "__main__":
-    logging.info("Starting AIPSRS backend (ASYNC)")
+    logging.info("Starting AIPSRS backend (ASYNC) on Linux/Render")
     app.run(host="0.0.0.0", port=5000, debug=True)
+    
