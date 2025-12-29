@@ -4,3 +4,5 @@ replicate
 python-dotenv
 werkzeug
 gunicorn
+supabase
+
