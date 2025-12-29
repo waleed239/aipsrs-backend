@@ -17,6 +17,7 @@ from werkzeug.utils import secure_filename
 
 import replicate
 from supabase import create_client
+import imageio_ffmpeg as ffmpeg  # ✅ Cross-platform ffmpeg/ffprobe
 
 # =========================================================
 # Load .env
@@ -36,9 +37,6 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Linux/Render-ready ffprobe
-FFPROBE_PATH = "ffprobe"
-
 # =========================================================
 # App & Logging
 # =========================================================
@@ -57,8 +55,10 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def get_video_duration(path):
+    """Get video duration in seconds using imageio-ffmpeg (cross-platform)."""
+    ffprobe_path = ffmpeg.get_ffprobe_exe()
     cmd = [
-        FFPROBE_PATH,
+        ffprobe_path,
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
@@ -241,4 +241,3 @@ def stats(user_id):
 if __name__ == "__main__":
     logging.info("Starting AIPSRS backend (ASYNC) on Linux/Render")
     app.run(host="0.0.0.0", port=5000, debug=True)
-    
