@@ -3,3 +3,4 @@ flask-cors
 replicate
 python-dotenv
 werkzeug
+gunicorn
