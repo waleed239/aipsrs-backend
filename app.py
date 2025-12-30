@@ -1,14 +1,12 @@
-
 """
-AIPSRS - Flask Backend (Linux/Render Ready)
-ASYNC Replicate Prediction + Frontend-Safe JSON + Delete Support
+AIPSRS - Flask Backend (Render / Linux Production Ready)
+ASYNC Replicate Prediction + Supabase + Stable Upload
 """
 
 import os
 import uuid
 import logging
 import tempfile
-import subprocess
 import threading
 from datetime import datetime
 from dotenv import load_dotenv
@@ -18,10 +16,9 @@ from werkzeug.utils import secure_filename
 
 import replicate
 from supabase import create_client
-import imageio_ffmpeg as ffmpeg  # ✅ Cross-platform ffmpeg/ffprobe
 
 # =========================================================
-# Load .env
+# Load ENV
 # =========================================================
 load_dotenv()
 
@@ -33,6 +30,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Service Role Key
 SUPABASE_BUCKET = "videos"
 
+if not all([REPLICATE_API_TOKEN, REPLICATE_MODEL, REPLICATE_VERSION]):
+    raise ValueError("Replicate configuration missing")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase credentials missing")
 
@@ -41,38 +41,33 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # =========================================================
 # App & Logging
 # =========================================================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
 CORS(app)
 
 # =========================================================
 # Utils
 # =========================================================
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv"}
-MAX_VIDEO_SECONDS = 15
 
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def get_video_duration(path):
-    """Get video duration in seconds using imageio-ffmpeg (cross-platform)."""
-    ffprobe_path = ffmpeg.get_ffprobe_exe()
-    cmd = [
-        ffprobe_path,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        path
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return float(result.stdout.strip())
+def allowed_file(filename: str) -> bool:
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
 
 # =========================================================
-# Background Prediction (ASYNC)
+# Background Prediction (ASYNC THREAD)
 # =========================================================
-def background_prediction(record_uuid, video_path):
+def background_prediction(record_uuid: str, video_path: str):
     try:
+        logging.info(f"Starting prediction: {record_uuid}")
+
         model = replicate.models.get(REPLICATE_MODEL)
         version = model.versions.get(REPLICATE_VERSION)
 
@@ -83,10 +78,12 @@ def background_prediction(record_uuid, video_path):
                 api_token=REPLICATE_API_TOKEN
             )
 
-        text = " ".join(output) if isinstance(output, list) else str(output)
+        prediction_text = (
+            " ".join(output) if isinstance(output, list) else str(output)
+        )
 
         supabase.table("predictions").update({
-            "prediction": text,
+            "prediction": prediction_text,
             "status": "completed"
         }).eq("uuid", record_uuid).execute()
 
@@ -96,8 +93,8 @@ def background_prediction(record_uuid, video_path):
 
         logging.info(f"Prediction completed: {record_uuid}")
 
-    except Exception:
-        logging.exception("Async prediction failed")
+    except Exception as e:
+        logging.exception("Prediction failed")
 
         supabase.table("predictions").update({
             "status": "failed",
@@ -109,8 +106,11 @@ def background_prediction(record_uuid, video_path):
         }).eq("uuid", record_uuid).execute()
 
     finally:
-        if os.path.exists(video_path):
-            os.remove(video_path)
+        try:
+            if os.path.exists(video_path):
+                os.remove(video_path)
+        except Exception:
+            pass
 
 # =========================================================
 # Routes
@@ -122,6 +122,9 @@ def health():
         "time": datetime.utcnow().isoformat()
     })
 
+# ---------------------------------------------------------
+# Predict
+# ---------------------------------------------------------
 @app.route("/predict", methods=["POST"])
 def predict():
     user_id = request.form.get("user_id")
@@ -132,32 +135,34 @@ def predict():
         return jsonify({"error": "video required"}), 400
 
     file = request.files["video"]
-    if not allowed_file(file.filename):
-        return jsonify({"error": "invalid file"}), 400
+    if not file.filename or not allowed_file(file.filename):
+        return jsonify({"error": "invalid file type"}), 400
 
     record_uuid = str(uuid.uuid4())
     filename = secure_filename(file.filename)
-    supabase_name = f"{record_uuid}_{filename}"
+    storage_name = f"{record_uuid}_{filename}"
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
+    # Save temp file
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=os.path.splitext(filename)[1]
+    ) as tmp:
         file.save(tmp.name)
         tmp_path = tmp.name
 
-    if get_video_duration(tmp_path) > MAX_VIDEO_SECONDS:
-        os.remove(tmp_path)
-        return jsonify({"error": f"Video exceeds {MAX_VIDEO_SECONDS}s"}), 400
-
+    # Upload to Supabase Storage
     with open(tmp_path, "rb") as vf:
         supabase.storage.from_(SUPABASE_BUCKET).upload(
-            supabase_name,
+            storage_name,
             vf,
             {"content-type": "video/mp4"}
         )
 
+    # DB Records
     supabase.table("user_videos").insert({
         "uuid": record_uuid,
         "user_id": user_id,
-        "video_url": supabase_name,
+        "video_url": storage_name,
         "video_name": filename,
         "status": "processing"
     }).execute()
@@ -165,12 +170,13 @@ def predict():
     supabase.table("predictions").insert({
         "uuid": record_uuid,
         "user_id": user_id,
-        "video_url": supabase_name,
+        "video_url": storage_name,
         "video_name": filename,
         "status": "processing",
         "prediction": ""
     }).execute()
 
+    # Async prediction
     threading.Thread(
         target=background_prediction,
         args=(record_uuid, tmp_path),
@@ -180,19 +186,21 @@ def predict():
     return jsonify({
         "uuid": record_uuid,
         "status": "processing",
-        "message": "Video uploaded, prediction started"
+        "message": "Video uploaded. Prediction started."
     })
 
-# =========================================================
+# ---------------------------------------------------------
 # History
-# =========================================================
+# ---------------------------------------------------------
 @app.route("/history")
 def history():
-    res = supabase.table("predictions") \
-        .select("uuid, video_name, prediction, status, created_at") \
-        .order("created_at", desc=True) \
-        .limit(200) \
+    res = (
+        supabase.table("predictions")
+        .select("uuid, video_name, prediction, status, created_at")
+        .order("created_at", desc=True)
+        .limit(200)
         .execute()
+    )
 
     return jsonify([
         {
@@ -200,14 +208,14 @@ def history():
             "video_name": str(r.get("video_name", "")),
             "prediction": str(r.get("prediction", "")),
             "status": str(r.get("status", "")),
-            "created_at": str(r.get("created_at", ""))
+            "created_at": str(r.get("created_at", "")),
         }
-        for r in res.data
+        for r in (res.data or [])
     ])
 
-# =========================================================
-# DELETE History
-# =========================================================
+# ---------------------------------------------------------
+# Delete History
+# ---------------------------------------------------------
 @app.route("/history/<record_uuid>", methods=["DELETE"])
 def delete_history(record_uuid):
     if not record_uuid or record_uuid == "null":
@@ -223,13 +231,18 @@ def delete_history(record_uuid):
         "uuid": record_uuid
     })
 
-# =========================================================
+# ---------------------------------------------------------
 # Stats
-# =========================================================
+# ---------------------------------------------------------
 @app.route("/stats/<user_id>")
 def stats(user_id):
-    videos = supabase.table("user_videos").select("id", count="exact").eq("user_id", user_id).execute()
-    preds = supabase.table("predictions").select("id", count="exact").eq("user_id", user_id).execute()
+    videos = supabase.table("user_videos").select(
+        "id", count="exact"
+    ).eq("user_id", user_id).execute()
+
+    preds = supabase.table("predictions").select(
+        "id", count="exact"
+    ).eq("user_id", user_id).execute()
 
     return jsonify({
         "totalVideos": int(videos.count or 0),
@@ -237,8 +250,8 @@ def stats(user_id):
     })
 
 # =========================================================
-# Run
+# Run (Local Only)
 # =========================================================
 if __name__ == "__main__":
-    logging.info("Starting AIPSRS backend (ASYNC) on Linux/Render")
+    logging.info("Starting AIPSRS backend (DEV)")
     app.run(host="0.0.0.0", port=5000, debug=True)
