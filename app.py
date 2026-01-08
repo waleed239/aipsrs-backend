@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-
 import replicate
 from supabase import create_client
+import jwt  # PyJWT
 
 # =========================================================
 # Load ENV
@@ -60,6 +60,18 @@ def allowed_file(filename: str) -> bool:
         "." in filename
         and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
     )
+
+def get_user_id_from_token():
+    """Extract user_id from Supabase JWT token in Authorization header"""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header.replace("Bearer ", "")
+    try:
+        decoded = jwt.decode(token, options={"verify_signature": False})
+        return decoded.get("sub")
+    except Exception:
+        return None
 
 # =========================================================
 # Background Prediction (ASYNC THREAD)
@@ -190,13 +202,18 @@ def predict():
     })
 
 # ---------------------------------------------------------
-# History
+# History (USER-SPECIFIC)
 # ---------------------------------------------------------
 @app.route("/history")
 def history():
+    user_id = get_user_id_from_token()
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
     res = (
         supabase.table("predictions")
         .select("uuid, video_name, prediction, status, created_at")
+        .eq("user_id", user_id)
         .order("created_at", desc=True)
         .limit(200)
         .execute()
@@ -214,17 +231,28 @@ def history():
     ])
 
 # ---------------------------------------------------------
-# Delete History
+# Delete History (USER-SPECIFIC)
 # ---------------------------------------------------------
 @app.route("/history/<record_uuid>", methods=["DELETE"])
 def delete_history(record_uuid):
-    if not record_uuid or record_uuid == "null":
-        return jsonify({"error": "Invalid UUID"}), 400
+    user_id = get_user_id_from_token()
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
 
-    supabase.table("predictions").delete().eq("uuid", record_uuid).execute()
-    supabase.table("user_videos").delete().eq("uuid", record_uuid).execute()
+    # Delete only if record belongs to logged-in user
+    supabase.table("predictions") \
+        .delete() \
+        .eq("uuid", record_uuid) \
+        .eq("user_id", user_id) \
+        .execute()
 
-    logging.info(f"Deleted record: {record_uuid}")
+    supabase.table("user_videos") \
+        .delete() \
+        .eq("uuid", record_uuid) \
+        .eq("user_id", user_id) \
+        .execute()
+
+    logging.info(f"Deleted record: {record_uuid} (user: {user_id})")
 
     return jsonify({
         "status": "deleted",
@@ -234,15 +262,14 @@ def delete_history(record_uuid):
 # ---------------------------------------------------------
 # Stats
 # ---------------------------------------------------------
-@app.route("/stats/<user_id>")
-def stats(user_id):
-    videos = supabase.table("user_videos").select(
-        "id", count="exact"
-    ).eq("user_id", user_id).execute()
+@app.route("/stats")
+def stats():
+    user_id = get_user_id_from_token()
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
 
-    preds = supabase.table("predictions").select(
-        "id", count="exact"
-    ).eq("user_id", user_id).execute()
+    videos = supabase.table("user_videos").select("id", count="exact").eq("user_id", user_id).execute()
+    preds = supabase.table("predictions").select("id", count="exact").eq("user_id", user_id).execute()
 
     return jsonify({
         "totalVideos": int(videos.count or 0),
