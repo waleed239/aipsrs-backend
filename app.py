@@ -17,6 +17,9 @@ import replicate
 from supabase import create_client
 import jwt  # PyJWT
 
+# Added for video splitting
+from moviepy.editor import VideoFileClip
+
 # =========================================================
 # Load ENV
 # =========================================================
@@ -73,6 +76,33 @@ def get_user_id_from_token():
     except Exception:
         return None
 
+
+# =========================================================
+# Video Splitting (23 sec chunks)
+# =========================================================
+def split_video_to_chunks(video_path, chunk_duration=23):
+    clip = VideoFileClip(video_path)
+    duration = int(clip.duration)
+    chunks = []
+
+    start = 0
+    while start < duration:
+        end = min(start + chunk_duration, duration)
+        chunk_path = f"{video_path}_chunk_{start}.mp4"
+        clip.subclip(start, end).write_videofile(
+            chunk_path,
+            codec="libx264",
+            audio_codec="aac",
+            verbose=False,
+            logger=None
+        )
+        chunks.append(chunk_path)
+        start += chunk_duration
+
+    clip.close()
+    return chunks
+
+
 # =========================================================
 # Background Prediction (ASYNC THREAD)
 # =========================================================
@@ -83,16 +113,29 @@ def background_prediction(record_uuid: str, video_path: str):
         model = replicate.models.get(REPLICATE_MODEL)
         version = model.versions.get(REPLICATE_VERSION)
 
-        with open(video_path, "rb") as vf:
-            output = replicate.run(
-                version,
-                input={"video": vf},
-                api_token=REPLICATE_API_TOKEN
-            )
+        # Split video into chunks of 23 sec
+        chunks = split_video_to_chunks(video_path, chunk_duration=23)
 
-        prediction_text = (
-            " ".join(output) if isinstance(output, list) else str(output)
-        )
+        all_outputs = []
+
+        for chunk in chunks:
+            with open(chunk, "rb") as vf:
+                output = replicate.run(
+                    version,
+                    input={"video": vf},
+                    api_token=REPLICATE_API_TOKEN
+                )
+
+            if isinstance(output, list):
+                all_outputs.extend(output)
+            else:
+                all_outputs.append(str(output))
+
+            # delete chunk after prediction
+            if os.path.exists(chunk):
+                os.remove(chunk)
+
+        prediction_text = " ".join(all_outputs)
 
         supabase.table("predictions").update({
             "prediction": prediction_text,
@@ -124,6 +167,7 @@ def background_prediction(record_uuid: str, video_path: str):
         except Exception:
             pass
 
+
 # =========================================================
 # Routes
 # =========================================================
@@ -133,6 +177,7 @@ def health():
         "status": "ok",
         "time": datetime.utcnow().isoformat()
     })
+
 
 # ---------------------------------------------------------
 # Predict
@@ -201,6 +246,7 @@ def predict():
         "message": "Video uploaded. Prediction started."
     })
 
+
 # ---------------------------------------------------------
 # History (USER-SPECIFIC)
 # ---------------------------------------------------------
@@ -229,6 +275,7 @@ def history():
         }
         for r in (res.data or [])
     ])
+
 
 # ---------------------------------------------------------
 # Delete History (USER-SPECIFIC)
@@ -259,6 +306,7 @@ def delete_history(record_uuid):
         "uuid": record_uuid
     })
 
+
 # ---------------------------------------------------------
 # Stats
 # ---------------------------------------------------------
@@ -275,6 +323,7 @@ def stats():
         "totalVideos": int(videos.count or 0),
         "historyCount": int(preds.count or 0)
     })
+
 
 # =========================================================
 # Run (Local Only)
