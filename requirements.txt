@@ -6,3 +6,4 @@ werkzeug
 gunicorn
 supabase
 imageio-ffmpeg
+moviepy==1.0.3
