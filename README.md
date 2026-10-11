@@ -49,9 +49,6 @@ The deployed version runs on Render using start.sh.
 Model constraints (from the model's Replicate page)
 Formats: MP4, MOV, MKV, WebM; 2 to 40 seconds; at most 1080p
 Exactly one visible face; best with good lighting and an unobstructed mouth
-Evaluation
-
-Results: to be added after the evaluation runs (number of clips, conditions, word error rate, character error rate, response time).
 
 Known limitations
 Accuracy and latency depend on an external model and on video quality.
